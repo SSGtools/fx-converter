@@ -14,7 +14,15 @@ import io, json
 from datetime import datetime
 
 app = FastAPI(title="FX Financial Report Converter")
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_origin_regex=".*",
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=["*"],
+)
 
 SKIP_SHEETS = {"filters","filter","settings","config","metadata","lookup"}
 
