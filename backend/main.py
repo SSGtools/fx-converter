@@ -398,18 +398,30 @@ async def preview(
         [k for bc in branch_cols
          for k in ([f"{bc}__orig", f"{bc}__conv"] if bc in sel else [f"{bc}__orig"])]
     )
-    return {
-        "sheet_name":    sheet,
-        "branch_cols":   branch_cols,
-        "selected_cols": sel,
-        "is_multi":      len(branch_cols) > 1,
-        "rows":          len(data_rows),
-        "totals":        totals,
-        "from_currency": from_currency,
-        "to_currency":   to_currency,
-        "exchange_rate": rate,
-        "preview":       df[preview_keys].head(15).to_dict("records"),
-    }
+    import math
+
+def clean(val):
+    if isinstance(val, float) and (math.isnan(val) or math.isinf(val)):
+        return None
+    return val
+
+preview_records = [
+    {k: clean(v) for k, v in record.items()}
+    for record in df[preview_keys].head(15).to_dict("records")
+]
+
+return {
+    "sheet_name":    sheet,
+    "branch_cols":   branch_cols,
+    "selected_cols": sel,
+    "is_multi":      len(branch_cols) > 1,
+    "rows":          len(data_rows),
+    "totals":        totals,
+    "from_currency": from_currency,
+    "to_currency":   to_currency,
+    "exchange_rate": rate,
+    "preview":       preview_records,
+}
 
 
 @app.post("/download/xlsx")
