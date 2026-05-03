@@ -238,15 +238,28 @@ export default function App() {
   const [error,setError]           = useState("");
   const [result,setResult]         = useState(null);
 
-  // Live rate fetch
+  // Live rate fetch — calls frankfurter.app directly from browser
   useEffect(()=>{
     if(!fromCur||!toCur||fromCur===toCur){setRate("1");setRateSource("manual");return;}
     setRateLoading(true); setRateSource("");
-    fetch(`${FX_API}/latest?from=${fromCur}&to=${toCur}`)
-      .then(r=>r.json()).then(data=>{
+    const controller = new AbortController();
+    fetch(`https://api.frankfurter.app/latest?from=${fromCur}&to=${toCur}`, { signal: controller.signal })
+      .then(r => { if(!r.ok) throw new Error("Rate fetch failed"); return r.json(); })
+      .then(data=>{
         const r = data.rates?.[toCur];
-        if(r){setRate(String(r));setRateSource("live");setRateDate(data.date??"");}
-      }).catch(()=>setRateSource("manual")).finally(()=>setRateLoading(false));
+        if(r){
+          setRate(r.toFixed(6).replace(/\.?0+$/,""));
+          setRateSource("live");
+          setRateDate(data.date??"");
+        } else {
+          setRateSource("manual");
+        }
+      })
+      .catch(err => {
+        if(err.name !== "AbortError") setRateSource("manual");
+      })
+      .finally(()=>setRateLoading(false));
+    return () => controller.abort();
   },[fromCur,toCur]);
 
   // Auto-detect columns when file is uploaded
@@ -365,7 +378,7 @@ export default function App() {
               Rate &nbsp;
               {rateLoading&&<span style={{color:"#a78bfa"}}>fetching live rate…</span>}
               {!rateLoading&&rateSource==="live"&&(
-                <span style={{color:"#86efac"}}>✓ Live · {rateDate}
+                <span style={{color:"#86efac"}}>✓ Live rate · {rateDate}
                   <button onClick={()=>setRateSource("manual")}
                     style={{marginLeft:8,background:"none",border:"none",
                             color:"#9ca3af",cursor:"pointer",fontSize:11}}>
@@ -373,7 +386,10 @@ export default function App() {
                   </button>
                 </span>
               )}
-              {!rateLoading&&rateSource==="manual"&&<span style={{color:"#fbbf24"}}>manual</span>}
+              {!rateLoading&&rateSource==="manual"&&rate&&<span style={{color:"#fbbf24"}}>manual</span>}
+              {!rateLoading&&rateSource==="manual"&&!rate&&(
+                <span style={{color:"#f87171"}}>live rate unavailable — enter manually</span>
+              )}
             </label>
             <input type="number" min="0.0001" step="0.0001" value={rate}
               onChange={e=>{setRate(e.target.value);setRateSource("manual");}}
