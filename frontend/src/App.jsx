@@ -238,28 +238,39 @@ export default function App() {
   const [error,setError]           = useState("");
   const [result,setResult]         = useState(null);
 
-  // Live rate fetch — calls frankfurter.app directly from browser
+  // Live rate fetch — tries 3 free APIs with fallback
   useEffect(()=>{
     if(!fromCur||!toCur||fromCur===toCur){setRate("1");setRateSource("manual");return;}
     setRateLoading(true); setRateSource("");
-    const controller = new AbortController();
-    fetch(`https://api.frankfurter.app/latest?from=${fromCur}&to=${toCur}`, { signal: controller.signal })
-      .then(r => { if(!r.ok) throw new Error("Rate fetch failed"); return r.json(); })
-      .then(data=>{
-        const r = data.rates?.[toCur];
-        if(r){
-          setRate(r.toFixed(6).replace(/\.?0+$/,""));
-          setRateSource("live");
-          setRateDate(data.date??"");
-        } else {
-          setRateSource("manual");
-        }
-      })
-      .catch(err => {
-        if(err.name !== "AbortError") setRateSource("manual");
-      })
-      .finally(()=>setRateLoading(false));
-    return () => controller.abort();
+
+    const tryFetch = async () => {
+      // Try 1: new frankfurter.dev v2
+      try {
+        const r = await fetch(`https://api.frankfurter.dev/v2/rates?base=${fromCur}&quotes=${toCur}`);
+        if(r.ok){ const d=await r.json(); const v=d.rates?.[toCur]; if(v) return {rate:v, date:d.date??""}; }
+      } catch(_){}
+      // Try 2: open.er-api.com (no key needed)
+      try {
+        const r = await fetch(`https://open.er-api.com/v6/latest/${fromCur}`);
+        if(r.ok){ const d=await r.json(); const v=d.rates?.[toCur]; if(v) return {rate:v, date:d.time_last_update_utc?.slice(0,10)??""}; }
+      } catch(_){}
+      // Try 3: original frankfurter.app
+      try {
+        const r = await fetch(`https://api.frankfurter.app/latest?from=${fromCur}&to=${toCur}`);
+        if(r.ok){ const d=await r.json(); const v=d.rates?.[toCur]; if(v) return {rate:v, date:d.date??""}; }
+      } catch(_){}
+      return null;
+    };
+
+    tryFetch().then(result=>{
+      if(result){
+        setRate(result.rate.toFixed(6).replace(/\.?0+$/,""));
+        setRateSource("live");
+        setRateDate(result.date);
+      } else {
+        setRateSource("manual");
+      }
+    }).finally(()=>setRateLoading(false));
   },[fromCur,toCur]);
 
   // Auto-detect columns when file is uploaded
