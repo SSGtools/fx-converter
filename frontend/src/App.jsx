@@ -6,7 +6,7 @@ const FX_API  = "https://api.frankfurter.app";
 const CURRENCIES = [
   "AED","AUD","BGN","BRL","CAD","CHF","CNY","CZK","DKK","EUR",
   "GBP","HKD","HUF","IDR","ILS","INR","ISK","JPY","KRW","MXN",
-  "MYR","NOK","NZD","PHP","PLN","RON","SEK","SGD","THB","TRY","USD","ZAR"
+  "MYR","NOK","NZD","PHP","PLN","RON","SEK","SGD","THB","TRY","USD","XCD","ZAR"
 ];
 const CURRENCY_NAMES = {
   AED:"UAE Dirham",AUD:"Australian Dollar",BGN:"Bulgarian Lev",BRL:"Brazilian Real",
@@ -16,7 +16,7 @@ const CURRENCY_NAMES = {
   ISK:"Icelandic Króna",JPY:"Japanese Yen",KRW:"South Korean Won",MXN:"Mexican Peso",
   MYR:"Malaysian Ringgit",NOK:"Norwegian Krone",NZD:"New Zealand Dollar",PHP:"Philippine Peso",
   PLN:"Polish Zloty",RON:"Romanian Leu",SEK:"Swedish Krona",SGD:"Singapore Dollar",
-  THB:"Thai Baht",TRY:"Turkish Lira",USD:"US Dollar",ZAR:"South African Rand"
+  THB:"Thai Baht",TRY:"Turkish Lira",USD:"US Dollar",XCD:"East Caribbean Dollar",ZAR:"South African Rand"
 };
 
 const fmt = (n, d=2) => n == null ? "—" :
