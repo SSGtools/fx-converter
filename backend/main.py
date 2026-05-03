@@ -1,5 +1,5 @@
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
@@ -13,7 +13,7 @@ from reportlab.lib import colors
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import inch
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph
-import io, json, string
+import io, json, string, math
 from datetime import datetime
 
 # ── App + forced CORS middleware ──────────────────────────────────────────────
@@ -25,7 +25,13 @@ class ForceCORSMiddleware(BaseHTTPMiddleware):
         if request.method == "OPTIONS":
             response = Response()
         else:
-            response = await call_next(request)
+            try:
+                response = await call_next(request)
+            except Exception as e:
+                response = JSONResponse(
+                    status_code=500,
+                    content={"detail": str(e)}
+                )
         response.headers["Access-Control-Allow-Origin"]  = "*"
         response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
         response.headers["Access-Control-Allow-Headers"] = "*"
@@ -35,7 +41,19 @@ app.add_middleware(ForceCORSMiddleware)
 
 SKIP_SHEETS = {"filters","filter","settings","config","metadata","lookup"}
 
-# ── Live FX rate proxy (avoids browser CORS on frankfurter.app) ───────────────
+
+def clean_nan(val):
+    """Convert NaN/Inf floats to None so JSON serialization never fails."""
+    if isinstance(val, float) and (math.isnan(val) or math.isinf(val)):
+        return None
+    return val
+
+
+def clean_records(records: list) -> list:
+    return [{k: clean_nan(v) for k, v in row.items()} for row in records]
+
+
+# ── Live FX rate proxy ────────────────────────────────────────────────────────
 
 @app.get("/fx-rate")
 async def fx_rate(from_currency: str, to_currency: str):
@@ -60,11 +78,11 @@ def pick_sheet(xl):
 
 
 def detect_structure(contents: bytes):
-    xl    = pd.ExcelFile(io.BytesIO(contents))
-    sheet = pick_sheet(xl)
+    xl     = pd.ExcelFile(io.BytesIO(contents))
+    sheet  = pick_sheet(xl)
     df_raw = pd.read_excel(io.BytesIO(contents), sheet_name=sheet, header=None)
 
-    # Find the header row (contains account/code/name AND balance/amount)
+    # Find header row
     header_row_idx = None
     for ri in range(min(8, len(df_raw))):
         vals = [str(v).lower().strip() for v in df_raw.iloc[ri] if pd.notna(v)]
@@ -77,7 +95,6 @@ def detect_structure(contents: bytes):
     if header_row_idx is None:
         raise HTTPException(400, f"Could not find column headers in sheet '{sheet}'.")
 
-    # Read with the detected header row
     df_hdr = pd.read_excel(io.BytesIO(contents), sheet_name=sheet, header=header_row_idx)
     df_hdr.columns = [str(c).strip() for c in df_hdr.columns]
 
@@ -94,11 +111,11 @@ def detect_structure(contents: bytes):
     if not amt_raw:
         raise HTTPException(400, f"No amount/balance column found. Columns: {list(df_hdr.columns)}")
 
-    n_amt = len(amt_raw)
-    all_col_names    = list(df_hdr.columns)
-    amt_col_indices  = [all_col_names.index(c) for c in amt_raw]
+    n_amt           = len(amt_raw)
+    all_col_names   = list(df_hdr.columns)
+    amt_col_indices = [all_col_names.index(c) for c in amt_raw]
 
-    # Scan ALL pre-header rows to find branch/column names at the amount column positions
+    # Scan pre-header rows for branch names
     branch_names = []
     for ri in range(header_row_idx):
         row_vals   = list(df_raw.iloc[ri])
@@ -112,17 +129,14 @@ def detect_structure(contents: bytes):
             branch_names = candidates
             break
         elif len(candidates) > len(branch_names):
-            branch_names = candidates  # keep best partial match so far
+            branch_names = candidates
 
-    # Fall back to generic names if nothing found
     if not branch_names:
         branch_names = ["Balance"] if n_amt == 1 else [f"Column {i+1}" for i in range(n_amt)]
 
-    # Rename amount columns to branch names
     rename_map = dict(zip(amt_raw, branch_names[:n_amt]))
     df = df_hdr.rename(columns=rename_map)
 
-    # Standardise code / account_name
     if code_col:
         df = df.rename(columns={code_col: "code"})
     else:
@@ -137,10 +151,8 @@ def detect_structure(contents: bytes):
     for col in branch_names:
         df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    # Row type: data if any amount column has a value, else header/section
     df["row_type"] = df[branch_names].notna().any(axis=1).map({True:"data",False:"header"})
 
-    # Drop completely blank rows
     df = df[~(
         (df["code"] == "") &
         (df["account_name"] == "") &
@@ -178,7 +190,6 @@ def build_excel(df, branch_cols, selected_cols, rate, from_cur, to_cur, sheet_na
 
     n_cols = len(col_headers)
 
-    # Title
     ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=n_cols)
     ws.cell(1,1).value     = f"Financial Report — {sheet_name}"
     ws.cell(1,1).font      = Font(name="Arial", bold=True, size=14, color="E8D5B7")
@@ -186,7 +197,6 @@ def build_excel(df, branch_cols, selected_cols, rate, from_cur, to_cur, sheet_na
     ws.cell(1,1).alignment = Alignment(horizontal="center", vertical="center")
     ws.row_dimensions[1].height = 30
 
-    # Subtitle
     ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=n_cols)
     ws.cell(2,1).value = (
         f"Rate: 1 {from_cur} = {rate} {to_cur}   |   "
@@ -197,9 +207,8 @@ def build_excel(df, branch_cols, selected_cols, rate, from_cur, to_cur, sheet_na
     ws.cell(2,1).fill      = PatternFill("solid", start_color="16213E")
     ws.cell(2,1).alignment = Alignment(horizontal="center", vertical="center")
     ws.row_dimensions[2].height = 18
-    ws.append([])  # spacer row 3
+    ws.append([])
 
-    # Column headers row 4
     for ci, h in enumerate(col_headers, 1):
         c = ws.cell(4, ci, h)
         c.font      = Font(name="Arial", bold=True, size=10, color="E8D5B7")
@@ -214,51 +223,44 @@ def build_excel(df, branch_cols, selected_cols, rate, from_cur, to_cur, sheet_na
         is_hdr = row["row_type"] == "header"
         if not is_hdr:
             data_count += 1
-        alt = data_count % 2 == 0
 
         row_fill = (PatternFill("solid", start_color="2D2B55") if is_hdr else
-                    PatternFill("solid", start_color="F5F3FF") if alt else None)
+                    PatternFill("solid", start_color="F5F3FF") if data_count % 2 == 0 else None)
 
-        # Code cell
         c1 = ws.cell(r, 1, "" if is_hdr else str(row["code"]))
-        c1.font      = Font(name="Arial", size=9, color="C4B5FD" if is_hdr else "9CA3AF")
-        c1.border    = b
-        c1.alignment = Alignment(vertical="center")
+        c1.font = Font(name="Arial", size=9, color="C4B5FD" if is_hdr else "9CA3AF")
+        c1.border = b; c1.alignment = Alignment(vertical="center")
         if row_fill: c1.fill = row_fill
 
-        # Account name cell
         c2 = ws.cell(r, 2, str(row["account_name"]))
-        c2.font      = Font(name="Arial", bold=is_hdr, size=10,
-                            color="C4B5FD" if is_hdr else "1F2937")
-        c2.border    = b
+        c2.font   = Font(name="Arial", bold=is_hdr, size=10, color="C4B5FD" if is_hdr else "1F2937")
+        c2.border = b
         c2.alignment = Alignment(vertical="center", indent=0 if is_hdr else 1)
         if row_fill: c2.fill = row_fill
 
-        # Amount columns
         ci = 3
         for orig_key, conv_key in col_keys:
             v = row.get(orig_key)
-            c = ws.cell(r, ci, float(v) if pd.notna(v) else None)
+            val = float(v) if pd.notna(v) else None
+            c = ws.cell(r, ci, val)
             c.number_format = "#,##0.00"
-            c.alignment     = Alignment(horizontal="right", vertical="center")
-            c.border        = b
-            c.font          = Font(name="Arial", bold=is_hdr, size=9,
-                                   color="C4B5FD" if is_hdr else "374151")
+            c.alignment = Alignment(horizontal="right", vertical="center")
+            c.border = b
+            c.font = Font(name="Arial", bold=is_hdr, size=9, color="C4B5FD" if is_hdr else "374151")
             if row_fill: c.fill = row_fill
             ci += 1
 
             if conv_key:
                 cv = row.get(conv_key)
-                cc = ws.cell(r, ci, float(cv) if pd.notna(cv) else None)
+                cval = float(cv) if pd.notna(cv) else None
+                cc = ws.cell(r, ci, cval)
                 cc.number_format = "#,##0.00"
-                cc.alignment     = Alignment(horizontal="right", vertical="center")
-                cc.border        = b
-                cc.font          = Font(name="Arial", bold=is_hdr, size=9,
-                                        color="86EFAC" if is_hdr else "065F46")
-                cc.fill          = row_fill if row_fill else PatternFill("solid", start_color="F0FDF4")
+                cc.alignment = Alignment(horizontal="right", vertical="center")
+                cc.border = b
+                cc.font = Font(name="Arial", bold=is_hdr, size=9, color="86EFAC" if is_hdr else "065F46")
+                cc.fill = row_fill if row_fill else PatternFill("solid", start_color="F0FDF4")
                 ci += 1
 
-    # Column widths
     ws.column_dimensions["A"].width = 12
     ws.column_dimensions["B"].width = 42
     alpha = list(string.ascii_uppercase)
@@ -295,7 +297,7 @@ def build_pdf(df, branch_cols, selected_cols, rate, from_cur, to_cur, sheet_name
     name_w  = 2.2*inch
     code_w  = 0.7*inch
     n_amt   = len(branch_cols) + len(selected_cols)
-    amt_w   = max(0.65*inch, min(1.1*inch, (avail_w - name_w - code_w) / max(n_amt,1)))
+    amt_w   = max(0.65*inch, min(1.1*inch, (avail_w - name_w - code_w) / max(n_amt, 1)))
 
     col_headers = ["Code", "Account Name"]
     col_widths  = [code_w, name_w]
@@ -388,40 +390,31 @@ async def preview(
 ):
     df, sheet, branch_cols, sel, rate = await read_request(file, exchange_rate, selected_cols)
     data_rows = df[df["row_type"] == "data"]
+
     totals = {}
     for bc in branch_cols:
-        totals[f"{bc}__orig"] = float(data_rows[f"{bc}__orig"].sum(skipna=True))
+        totals[f"{bc}__orig"] = clean_nan(float(data_rows[f"{bc}__orig"].sum(skipna=True)))
         if bc in sel:
-            totals[f"{bc}__conv"] = float(data_rows[f"{bc}__conv"].sum(skipna=True))
+            totals[f"{bc}__conv"] = clean_nan(float(data_rows[f"{bc}__conv"].sum(skipna=True)))
+
     preview_keys = (
         ["code","account_name","row_type"] +
         [k for bc in branch_cols
          for k in ([f"{bc}__orig", f"{bc}__conv"] if bc in sel else [f"{bc}__orig"])]
     )
-    import math
 
-def clean(val):
-    if isinstance(val, float) and (math.isnan(val) or math.isinf(val)):
-        return None
-    return val
-
-preview_records = [
-    {k: clean(v) for k, v in record.items()}
-    for record in df[preview_keys].head(15).to_dict("records")
-]
-
-return {
-    "sheet_name":    sheet,
-    "branch_cols":   branch_cols,
-    "selected_cols": sel,
-    "is_multi":      len(branch_cols) > 1,
-    "rows":          len(data_rows),
-    "totals":        totals,
-    "from_currency": from_currency,
-    "to_currency":   to_currency,
-    "exchange_rate": rate,
-    "preview":       preview_records,
-}
+    return {
+        "sheet_name":    sheet,
+        "branch_cols":   branch_cols,
+        "selected_cols": sel,
+        "is_multi":      len(branch_cols) > 1,
+        "rows":          len(data_rows),
+        "totals":        totals,
+        "from_currency": from_currency,
+        "to_currency":   to_currency,
+        "exchange_rate": rate,
+        "preview":       clean_records(df[preview_keys].head(15).to_dict("records")),
+    }
 
 
 @app.post("/download/xlsx")
