@@ -249,24 +249,74 @@ def write_sheet(ws, df, branch_cols, selected_cols, rate, from_cur, to_cur, shee
     return n_cols
 
 
+# ── Report type detection ─────────────────────────────────────────────────────
+
+# Maps keywords found in filename or sheet name → report type label + tab suffix
+REPORT_TYPE_MAP = [
+    (["profit","loss","p&l","pnl","income","revenue"],  "P&L",           "P&L"),
+    (["balance","sheet","bs"],                           "Balance Sheet", "Balance Sheet"),
+    (["aged","ar","receivable"],                         "Aged AR",       "Aged AR"),
+    (["aged","ap","payable"],                            "Aged AP",       "Aged AP"),
+    (["trial","balance","tb"],                           "Trial Balance", "Trial Balance"),
+    (["cash","flow"],                                    "Cash Flow",     "Cash Flow"),
+]
+
+def infer_report_type(filename: str, sheet_name: str) -> tuple[str, str]:
+    """
+    Returns (report_type_label, tab_suffix) by scanning filename and sheet name.
+    Falls back to the filename if nothing matches.
+    """
+    haystack = f"{filename} {sheet_name}".lower()
+    for keywords, label, suffix in REPORT_TYPE_MAP:
+        # Require at least 2 keywords to match for multi-keyword types (aged ar/ap, cash flow)
+        # For single-distinguishing types just one match is enough
+        matches = sum(1 for kw in keywords if kw in haystack)
+        if matches >= 1:
+            return label, suffix
+    return "Report", filename  # fallback
+
+
+def make_tab_name(report_type_suffix: str, to_cur: str, existing_tabs: list[str]) -> str:
+    """
+    Builds a clean Excel tab name like 'P&L USD', 'Balance Sheet USD'.
+    Ensures uniqueness and stays within Excel's 31-char limit.
+    """
+    base = f"{report_type_suffix} {to_cur}"[:29].strip()
+    name = base
+    counter = 2
+    while name in existing_tabs:
+        name = f"{base} ({counter})"
+        counter += 1
+    return name
+
+
 # ── Summary sheet ─────────────────────────────────────────────────────────────
 
 def write_summary_sheet(ws, reports_meta, rate, from_cur, to_cur):
-    """reports_meta: list of {name, total_orig, total_conv, branch_cols, selected_cols}"""
+    """
+    Writes a clean summary sheet. One row per report — no Grand Total.
+    Columns: Report Name | Report Type | Local Currency | Local Total | to_cur Total | Rate Used
+
+    reports_meta: list of dicts with keys:
+        filename, sheet_name, report_type, total_orig, total_conv, rate
+    """
     thin = Side(style="thin", color="CCCCCC")
     b    = Border(left=thin, right=thin, top=thin, bottom=thin)
+    inv  = round(1 / rate, 4) if rate else 0
 
-    # Title
-    ws.merge_cells("A1:E1")
+    # ── Row 1: Title ──
+    ws.merge_cells("A1:F1")
     ws.cell(1,1).value     = "Financial Reports — Consolidated Summary"
     ws.cell(1,1).font      = Font(name="Arial", bold=True, size=16, color="E8D5B7")
     ws.cell(1,1).fill      = PatternFill("solid", start_color="0F3460")
     ws.cell(1,1).alignment = Alignment(horizontal="center", vertical="center")
     ws.row_dimensions[1].height = 36
 
-    ws.merge_cells("A2:E2")
+    # ── Row 2: Rate info ──
+    ws.merge_cells("A2:F2")
     ws.cell(2,1).value = (
-        f"Exchange Rate: 1 {from_cur} = {rate} {to_cur}   |   "
+        f"1 {from_cur} = {rate:.4f} {to_cur}   |   "
+        f"1 {to_cur} = {inv:.4f} {from_cur}   |   "
         f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}   |   "
         f"{len(reports_meta)} report(s)"
     )
@@ -274,10 +324,18 @@ def write_summary_sheet(ws, reports_meta, rate, from_cur, to_cur):
     ws.cell(2,1).fill      = PatternFill("solid", start_color="16213E")
     ws.cell(2,1).alignment = Alignment(horizontal="center", vertical="center")
     ws.row_dimensions[2].height = 20
-    ws.append([])
 
-    # Column headers
-    headers = ["Report", "Sheet / Type", f"Total ({from_cur})", f"Total ({to_cur})", "Variance"]
+    ws.append([])  # blank spacer row 3
+
+    # ── Row 4: Column headers ──
+    headers = [
+        "Report Name",
+        "Report Type",
+        "Local Currency",
+        f"Local Total ({from_cur})",
+        f"{to_cur} Total",
+        "Rate Used",
+    ]
     for ci, h in enumerate(headers, 1):
         c = ws.cell(4, ci, h)
         c.font      = Font(name="Arial", bold=True, size=11, color="E8D5B7")
@@ -286,83 +344,76 @@ def write_summary_sheet(ws, reports_meta, rate, from_cur, to_cur):
         c.border    = b
     ws.row_dimensions[4].height = 24
 
-    grand_orig = 0
-    grand_conv = 0
+    # Freeze header rows so they stay visible when scrolling
+    ws.freeze_panes = "A5"
 
+    # ── Data rows — one per report, NO grand total ──
     for i, meta in enumerate(reports_meta):
-        r   = 5 + i
-        alt = PatternFill("solid", start_color="F0F4FF") if i % 2 == 0 else None
+        r        = 5 + i
+        alt_fill = PatternFill("solid", start_color="F0F4FF") if i % 2 == 0 else None
 
-        cells = [
-            (1, meta["filename"]),
-            (2, meta["sheet_name"]),
-            (3, meta["total_orig"]),
-            (4, meta["total_conv"]),
-            (5, meta["total_conv"] - meta["total_orig"]),
+        row_data = [
+            (1, meta["filename"],      False),   # Report Name
+            (2, meta["report_type"],   False),   # Report Type
+            (3, from_cur,              False),   # Local Currency
+            (4, meta["total_orig"],    True),    # Local Total
+            (5, meta["total_conv"],    True),    # to_cur Total
+            (6, meta["rate"],          False),   # Rate Used
         ]
-        for ci, val in cells:
+
+        for ci, val, is_num in row_data:
             c = ws.cell(r, ci, val)
-            c.border = b
-            c.font   = Font(name="Arial", size=10)
-            c.alignment = Alignment(vertical="center",
-                                    horizontal="right" if ci >= 3 else "left")
-            if ci >= 3: c.number_format = "#,##0.00"
-            if alt: c.fill = alt
-            # colour variance
-            if ci == 5 and isinstance(val, float):
-                c.font = Font(name="Arial", size=10,
-                              color="065F46" if val >= 0 else "991B1B")
+            c.border    = b
+            c.font      = Font(name="Arial", size=10)
+            c.alignment = Alignment(
+                vertical="center",
+                horizontal="right" if is_num or ci == 6 else "left"
+            )
+            if is_num:
+                c.number_format = "#,##0.00"
+            if ci == 6:
+                c.number_format = "0.00000"  # show rate to 5 decimal places
+            if alt_fill:
+                c.fill = alt_fill
 
-        grand_orig += meta["total_orig"] or 0
-        grand_conv += meta["total_conv"] or 0
+        ws.row_dimensions[r].height = 20
 
-    # Grand total row
-    tr = 5 + len(reports_meta)
-    total_fill = PatternFill("solid", start_color="0F3460")
-    total_font = Font(name="Arial", bold=True, size=11, color="E8D5B7")
-    for ci in range(1, 6):
-        c = ws.cell(tr, ci)
-        c.fill = total_fill; c.font = total_font; c.border = b
-        c.alignment = Alignment(horizontal="center", vertical="center")
-    ws.cell(tr,1).value = "GRAND TOTAL"
-    ws.cell(tr,3).value = grand_orig; ws.cell(tr,3).number_format = "#,##0.00"
-    ws.cell(tr,3).alignment = Alignment(horizontal="right", vertical="center")
-    ws.cell(tr,4).value = grand_conv; ws.cell(tr,4).number_format = "#,##0.00"
-    ws.cell(tr,4).alignment = Alignment(horizontal="right", vertical="center")
-    ws.cell(tr,5).value = grand_conv - grand_orig
-    ws.cell(tr,5).number_format = "#,##0.00"
-    ws.cell(tr,5).alignment = Alignment(horizontal="right", vertical="center")
-    ws.row_dimensions[tr].height = 22
-
-    ws.column_dimensions["A"].width = 30
-    ws.column_dimensions["B"].width = 25
-    ws.column_dimensions["C"].width = 20
-    ws.column_dimensions["D"].width = 20
-    ws.column_dimensions["E"].width = 18
+    # ── Auto-size columns ──
+    col_widths = [35, 20, 18, 22, 22, 14]
+    for i, w in enumerate(col_widths, 1):
+        ws.column_dimensions[get_column_letter(i)].width = w
 
 
 # ── Multi-report Excel ────────────────────────────────────────────────────────
 
 def build_multi_excel(reports, rate, from_cur, to_cur):
     """
-    reports: list of {df, branch_cols, selected_cols, sheet_name, filename, total_orig, total_conv}
-    Returns bytes of a single workbook with Summary tab + one tab per report.
+    Builds one workbook:
+      - Tab 1: Summary (one row per report, no grand total, rate header)
+      - Tab N: One tab per report, named '{Report Type} {to_cur}'
+                e.g. 'P&L USD', 'Balance Sheet USD'
+
+    Conversion is always: converted = local_amount * rate
     """
     wb = Workbook()
+
+    # Enrich each report with inferred type and clean tab name
+    existing_tabs = ["Summary"]
+    for rep in reports:
+        report_type, suffix = infer_report_type(rep["filename"], rep["sheet_name"])
+        rep["report_type"] = report_type
+        rep["tab_name"]    = make_tab_name(suffix, to_cur, existing_tabs)
+        rep["rate"]        = rate
+        existing_tabs.append(rep["tab_name"])
+
     # Summary sheet first
-    ws_summary = wb.active
-    ws_summary.title = "Summary"
+    ws_summary        = wb.active
+    ws_summary.title  = "Summary"
     write_summary_sheet(ws_summary, reports, rate, from_cur, to_cur)
 
-    # One sheet per report
+    # One sheet per report with smart tab name
     for rep in reports:
-        # Sanitise tab name: max 31 chars, no special chars
-        tab_name = rep["sheet_name"][:28].strip()
-        # Ensure unique tab names
-        existing = [ws.title for ws in wb.worksheets]
-        if tab_name in existing:
-            tab_name = tab_name[:25] + f"_{len(existing)}"
-        ws = wb.create_sheet(title=tab_name)
+        ws = wb.create_sheet(title=rep["tab_name"])
         write_sheet(ws, rep["df"], rep["branch_cols"], rep["selected_cols"],
                     rate, from_cur, to_cur, rep["filename"])
 
@@ -528,8 +579,10 @@ async def parse_one(file: UploadFile, exchange_rate: float, selected_cols_json: 
     total_conv = clean_nan(float(data_rows[[f"{bc}__conv" for bc in sel]].sum(skipna=True).sum()))
     return {
         "df": df, "sheet_name": sheet, "branch_cols": branch_cols,
-        "selected_cols": sel, "filename": file.filename.replace(".xlsx","").replace(".xls",""),
+        "selected_cols": sel,
+        "filename": file.filename.replace(".xlsx","").replace(".xls",""),
         "total_orig": total_orig, "total_conv": total_conv,
+        "rate": exchange_rate,
     }
 
 
