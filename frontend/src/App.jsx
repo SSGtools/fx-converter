@@ -242,7 +242,7 @@ export default function App() {
   useEffect(()=>{
     if(!fromCur||!toCur||fromCur===toCur){setRate("1");setRateSource("manual");return;}
     setRateLoading(true); setRateSource("");
-    fetch(`${API}/fx-rate?from_currency=${fromCur}&to_currency=${toCur}`)
+    fetch(`${FX_API}/latest?from=${fromCur}&to=${toCur}`)
       .then(r=>r.json()).then(data=>{
         const r = data.rates?.[toCur];
         if(r){setRate(String(r));setRateSource("live");setRateDate(data.date??"");}
