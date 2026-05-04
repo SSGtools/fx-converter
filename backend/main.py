@@ -135,14 +135,43 @@ def detect_structure(contents: bytes):
     keep = ["code","account_name"] + branch_names
     df   = df[[c for c in keep if c in df.columns]].copy()
 
-    df["code"]         = df["code"].fillna("").astype(str).str.strip().str.replace(r"\.0$","",regex=True)
+    # Clean code column — pandas reads integer codes as floats (10151.0) when column has blanks.
+    # Convert back to clean integer strings with no decimal suffix.
+    def clean_code(val):
+        if pd.isna(val) or str(val).strip() in ("", "nan"):
+            return ""
+        s = str(val).strip()
+        try:
+            f = float(s)
+            if f == int(f):
+                return str(int(f))   # 10151.0 → "10151"
+        except (ValueError, OverflowError):
+            pass
+        return s
+
+    df["code"]         = df["code"].apply(clean_code)
     df["account_name"] = df["account_name"].fillna("").astype(str).str.strip()
     for col in branch_names:
         df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    df["row_type"] = df[branch_names].notna().any(axis=1).map({True:"data",False:"header"})
+    # Row type — priority order:
+    #   1. Has a code → always "data" (even if balance blank, e.g. inactive/zero accounts)
+    #   2. Has any numeric amount → "data"
+    #   3. Otherwise → "header" (section labels: ASSETS, Total Bank, etc.)
+    def classify_row(row):
+        if row["code"] != "":
+            return "data"
+        if df[branch_names].loc[row.name].notna().any():
+            return "data"
+        return "header"
+
+    df["row_type"] = df.apply(classify_row, axis=1)
+
+    # Drop only fully empty rows (no code, no name, no amounts)
     df = df[~(
-        (df["code"] == "") & (df["account_name"] == "") & df[branch_names].isna().all(axis=1)
+        (df["code"] == "") &
+        (df["account_name"] == "") &
+        df[branch_names].isna().all(axis=1)
     )].reset_index(drop=True)
 
     return df, sheet, branch_names, len(branch_names) > 1
