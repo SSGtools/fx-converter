@@ -154,15 +154,20 @@ def detect_structure(contents: bytes):
     for col in branch_names:
         df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    # Row type — priority order:
-    #   1. Has a code → always "data" (even if balance blank, e.g. inactive/zero accounts)
-    #   2. Has any numeric amount → "data"
-    #   3. Otherwise → "header" (section labels: ASSETS, Total Bank, etc.)
+    # Row type — based entirely on whether the row has an account code.
+    # This matches how Odoo exports work: only real account entries have codes.
+    # Rows without codes are either section headings (Revenue, ASSETS) or
+    # subtotals (Total Revenue, Total Current Assets).
+    #
+    #   "data"     → has a code (real account entry, even if balance is blank)
+    #   "subtotal" → no code, name starts with "Total" or "Grand Total"
+    #   "header"   → no code, everything else (section/group label)
     def classify_row(row):
         if row["code"] != "":
             return "data"
-        if df[branch_names].loc[row.name].notna().any():
-            return "data"
+        name_lower = row["account_name"].lower().strip()
+        if name_lower.startswith("total") or name_lower.startswith("grand total"):
+            return "subtotal"
         return "header"
 
     df["row_type"] = df.apply(classify_row, axis=1)
@@ -233,29 +238,38 @@ def write_sheet(ws, df, branch_cols, selected_cols, rate, from_cur, to_cur, shee
         r      = ws.max_row + 1
         is_hdr = row["row_type"] == "header"
         if not is_hdr: data_count += 1
+        is_sub   = row["row_type"] == "subtotal"
         row_fill = (PatternFill("solid", start_color="2D2B55") if is_hdr else
+                    PatternFill("solid", start_color="E8E4F0") if is_sub else
                     PatternFill("solid", start_color="F5F3FF") if data_count % 2 == 0 else None)
 
-        c1 = ws.cell(r, 1, "" if is_hdr else str(row["code"]))
-        c1.font = Font(name="Arial", size=9, color="C4B5FD" if is_hdr else "9CA3AF")
-        c1.border = b; c1.alignment = Alignment(vertical="center")
+        # Code cell
+        c1 = ws.cell(r, 1, "" if (is_hdr or is_sub) else str(row["code"]))
+        c1.font      = Font(name="Arial", size=9,
+                            color="C4B5FD" if is_hdr else "6B7280" if is_sub else "9CA3AF")
+        c1.border    = b
+        c1.alignment = Alignment(vertical="center")
         if row_fill: c1.fill = row_fill
 
+        # Account name cell
         c2 = ws.cell(r, 2, str(row["account_name"]))
-        c2.font = Font(name="Arial", bold=is_hdr, size=10, color="C4B5FD" if is_hdr else "1F2937")
-        c2.border = b
-        c2.alignment = Alignment(vertical="center", indent=0 if is_hdr else 1)
+        c2.font      = Font(name="Arial", bold=(is_hdr or is_sub), size=10,
+                            color="C4B5FD" if is_hdr else "1F2937")
+        c2.border    = b
+        c2.alignment = Alignment(vertical="center", indent=0 if (is_hdr or is_sub) else 2)
         if row_fill: c2.fill = row_fill
 
+        # Amount cells
         ci = 3
         for orig_key, conv_key in col_keys:
             v   = row.get(orig_key)
             val = float(v) if pd.notna(v) else None
             c   = ws.cell(r, ci, val)
             c.number_format = "#,##0.00"
-            c.alignment = Alignment(horizontal="right", vertical="center")
-            c.border = b
-            c.font = Font(name="Arial", bold=is_hdr, size=9, color="C4B5FD" if is_hdr else "374151")
+            c.alignment     = Alignment(horizontal="right", vertical="center")
+            c.border        = b
+            c.font          = Font(name="Arial", bold=(is_hdr or is_sub), size=9,
+                                   color="C4B5FD" if is_hdr else "1F2937")
             if row_fill: c.fill = row_fill
             ci += 1
             if conv_key:
@@ -263,10 +277,11 @@ def write_sheet(ws, df, branch_cols, selected_cols, rate, from_cur, to_cur, shee
                 cval = float(cv) if pd.notna(cv) else None
                 cc   = ws.cell(r, ci, cval)
                 cc.number_format = "#,##0.00"
-                cc.alignment = Alignment(horizontal="right", vertical="center")
-                cc.border = b
-                cc.font = Font(name="Arial", bold=is_hdr, size=9, color="86EFAC" if is_hdr else "065F46")
-                cc.fill = row_fill if row_fill else PatternFill("solid", start_color="F0FDF4")
+                cc.alignment     = Alignment(horizontal="right", vertical="center")
+                cc.border        = b
+                cc.font          = Font(name="Arial", bold=(is_hdr or is_sub), size=9,
+                                        color="86EFAC" if is_hdr else "065F46")
+                cc.fill          = row_fill if row_fill else PatternFill("solid", start_color="F0FDF4")
                 ci += 1
 
     ws.column_dimensions["A"].width = 12
@@ -583,6 +598,12 @@ def build_multi_pdf(reports, rate, from_cur, to_cur):
                 cmd += [
                     ("BACKGROUND", (0,ri), (-1,ri), colors.HexColor("#2D2B55")),
                     ("TEXTCOLOR",  (0,ri), (-1,ri), colors.HexColor("#C4B5FD")),
+                    ("FONTNAME",   (0,ri), (-1,ri), "Helvetica-Bold"),
+                ]
+            elif row.row_type == "subtotal":
+                cmd += [
+                    ("BACKGROUND", (0,ri), (-1,ri), colors.HexColor("#E8E4F0")),
+                    ("TEXTCOLOR",  (0,ri), (-1,ri), colors.HexColor("#1F2937")),
                     ("FONTNAME",   (0,ri), (-1,ri), "Helvetica-Bold"),
                 ]
         tbl.setStyle(TableStyle(cmd))
